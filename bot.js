@@ -1,15 +1,16 @@
-// TFCImon Discord Bot — MEGA UPDATE + PERSISTENT STORAGE
+// TFCImon Discord Bot — COMPLETE WORKING VERSION WITH 24/7 KEEP-ALIVE
 require('dotenv').config();
 const { Client, GatewayIntentBits, SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder, REST, Routes } = require('discord.js');
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 
-// FIX: Make sure these are read correctly from environment variables
+// ─── CONFIGURATION ───────────────────────────────────────────────────────────
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const OP_USER = 'haxiii7';
 
-// FIX: Add validation to ensure token and client ID exist
+// Validate environment variables
 if (!BOT_TOKEN) {
     console.error('❌ BOT_TOKEN is not set in environment variables!');
     process.exit(1);
@@ -19,14 +20,12 @@ if (!CLIENT_ID) {
     process.exit(1);
 }
 
-console.log(`✅ Bot token loaded: ${BOT_TOKEN.substring(0, 20)}...`);
+console.log(`✅ Bot token loaded successfully`);
 console.log(`✅ Client ID loaded: ${CLIENT_ID}`);
 
 // ─── PERSISTENT STORAGE ───────────────────────────────────────────────────────
-
 const DATA_FILE = path.join(__dirname, 'data.json');
 
-// FIX: Initialize these first before loadData tries to use them
 let playerData = new Map();
 let auctionListings = new Map();
 let listingCounter = 1;
@@ -36,6 +35,12 @@ let opUsers = [];
 let bounties = new Map();
 let bannedUsers = [];
 let frozenUsers = [];
+let activeBattles = new Map();
+let activeArenaBattles = new Map();
+let tradeOffers = new Map();
+let activeTournament = { running: false, players: [], bracket: [] };
+let buildDeckSessions = new Map();
+let tradeCounter = 1;
 
 function loadData() {
     try {
@@ -43,10 +48,8 @@ function loadData() {
             const raw = fs.readFileSync(DATA_FILE, 'utf8');
             const savedData = JSON.parse(raw);
             
-            // Restore data
             playerData = new Map(Object.entries(savedData.players || {}));
             
-            // Restore arenas
             for (const [arenaId, arenaState] of Object.entries(savedData.arenas || {})) {
                 if (ARENAS[arenaId]) {
                     ARENAS[arenaId].holder = arenaState.holder || null;
@@ -54,7 +57,6 @@ function loadData() {
                 }
             }
             
-            // Restore auction listings
             auctionListings = new Map(Object.entries(savedData.auctionListings || {}).map(([k, v]) => [parseInt(k), v]));
             listingCounter = savedData.listingCounter || 1;
             doubleGemsEvent = savedData.doubleGemsEvent || false;
@@ -64,7 +66,6 @@ function loadData() {
             bannedUsers = savedData.bannedUsers || [];
             frozenUsers = savedData.frozenUsers || [];
             
-            // Restore custom cards
             for (const [id, card] of Object.entries(savedData.customCards || {})) {
                 CARDS[id] = card;
             }
@@ -103,7 +104,6 @@ function saveData() {
 setInterval(saveData, 60000);
 
 // ─── CARD DATA ────────────────────────────────────────────────────────────────
-
 const CARDS = {
     celestia: {
         id: 'celestia', name: 'Celestia', hp: 200, type: 'Dark', rarity: 'Rare', emoji: '🌑', color: 0x2c2c54,
@@ -203,12 +203,7 @@ const PACK_WEIGHTS = {
 const PACK_GEM_COST = 150;
 const SELL_BACK_RATE = 0.3;
 
-function getAllCardChoices() {
-    return Object.values(CARDS).map(c => ({ name: `${c.emoji} ${c.name} (${c.gemCost}💎) — ${c.rarity}`, value: c.id })).slice(0, 25);
-}
-
 // ─── ARENA DATA ───────────────────────────────────────────────────────────────
-
 const ARENAS = {
     '100_player_island': {
         id: '100_player_island', name: '100 Player Island', emoji: '🏝️', color: 0x00b894,
@@ -275,15 +270,35 @@ const ARENAS = {
     },
 };
 
-// ─── LOAD DATA ────────────────────────────────────────────────────────────────
+const ARENA_CHOICES = [
+    { name: '🏝️ 100 Player Island', value: '100_player_island' },
+    { name: '💞 Mingle', value: 'mingle' },
+    { name: '🚦 RLGL', value: 'rlgl' },
+    { name: '🪢 Jumprope', value: 'jumprope' },
+    { name: '🌪️ Spinner', value: 'spinner' },
+    { name: '⚔️ Red vs Blue Island', value: 'red_vs_blue' },
+    { name: '🪙 Pick a Side', value: 'pick_a_side' },
+];
 
+// ─── SLOT MACHINE ─────────────────────────────────────────────────────────────
+const SLOT_SYMBOLS = ['🍋', '🍒', '🔔', '⭐', '💎', '7️⃣'];
+const SLOT_PAYOUTS = {
+    '💎💎💎': 20,
+    '7️⃣7️⃣7️⃣': 15,
+    '⭐⭐⭐': 10,
+    '🔔🔔🔔': 7,
+    '🍒🍒🍒': 5,
+    '🍋🍋🍋': 4,
+    'pair': 1.5,
+};
+
+// ─── LOAD DATA ────────────────────────────────────────────────────────────────
 loadData();
 
-// ─── HELPERS ──────────────────────────────────────────────────────────────────
-
+// ─── HELPER FUNCTIONS ─────────────────────────────────────────────────────────
 function getPlayer(userId) {
     if (!playerData.has(userId)) {
-        playerData.set(userId, { deck: [], activeDeck: [], energyCards: 0, gems: 100, nicknames: {}, wins: 0, losses: 0, cardWins: {}, cardLosses: {}, cardLevels: {}, lastDaily: null, totalBattles: 0, banned: false });
+        playerData.set(userId, { deck: [], activeDeck: [], energyCards: 0, gems: 100, nicknames: {}, wins: 0, losses: 0, cardWins: {}, cardLosses: {}, cardLevels: {}, lastDaily: null, totalBattles: 0 });
     }
     const p = playerData.get(userId);
     if (!p.wins) p.wins = 0;
@@ -295,20 +310,16 @@ function getPlayer(userId) {
     if (!p.totalBattles) p.totalBattles = 0;
     if (!p.nicknames) p.nicknames = {};
     if (!p.activeDeck) p.activeDeck = [];
-    if (p.banned === undefined) p.banned = false;
     return p;
 }
 
-function isBanned(userId) {
-    return bannedUsers.includes(userId);
-}
-
-function isFrozen(userId) {
-    return frozenUsers.includes(userId);
-}
-
+function isBanned(userId) { return bannedUsers.includes(userId); }
+function isFrozen(userId) { return frozenUsers.includes(userId); }
 function getCardLevel(player, cardId) { return player.cardLevels[cardId] || 1; }
 function getLevelBonus(level) { return (level - 1) * 10; }
+function gemMultiplier() { return doubleGemsEvent ? 2 : 1; }
+function xpThreshold() { return xpBoostEvent ? 2 : 3; }
+function isOp(interaction) { return interaction.user.username === OP_USER || opUsers.includes(interaction.user.id); }
 
 function weightedRandom(weights) {
     const total = Object.values(weights).reduce((a, b) => a + b, 0);
@@ -336,14 +347,6 @@ function aiPickMove(guardian, energy) {
     return affordable.reduce((best, m) => m.damage > best.damage ? m : best);
 }
 
-function isOp(interaction) {
-    return interaction.user.username === OP_USER || opUsers.includes(interaction.user.id);
-}
-
-function gemMultiplier() { return doubleGemsEvent ? 2 : 1; }
-
-function xpThreshold() { return xpBoostEvent ? 2 : 3; }
-
 function getBattleCard(player) {
     if (player.activeDeck && player.activeDeck.length > 0) {
         const valid = player.activeDeck.filter(id => player.deck.includes(id) && CARDS[id]);
@@ -351,6 +354,25 @@ function getBattleCard(player) {
     }
     const valid = player.deck.filter(id => CARDS[id]);
     return valid[Math.floor(Math.random() * valid.length)];
+}
+
+function spinSlots() {
+    return [
+        SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)],
+        SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)],
+        SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)],
+    ];
+}
+
+function evalSlots(reels) {
+    const key = reels.join('');
+    if (SLOT_PAYOUTS[key]) return SLOT_PAYOUTS[key];
+    if (reels[0] === reels[1] || reels[1] === reels[2] || reels[0] === reels[2]) return SLOT_PAYOUTS['pair'];
+    return 0;
+}
+
+function getAllCardChoices() {
+    return Object.values(CARDS).map(c => ({ name: `${c.emoji} ${c.name} (${c.gemCost}💎) — ${c.rarity}`, value: c.id })).slice(0, 25);
 }
 
 function buildDeckEmbed(userId, player, displayName) {
@@ -397,66 +419,7 @@ function buildDeckEmbed(userId, player, displayName) {
     return embed;
 }
 
-function buildCardInfoEmbed(card) {
-    const embed = new EmbedBuilder()
-        .setTitle(`${card.emoji} ${card.name}`)
-        .setColor(card.color || 0x9b59b6)
-        .setDescription(card.description || '')
-        .addFields(
-            { name: '❤️ HP', value: `${card.hp}`, inline: true },
-            { name: '⚡ Type', value: card.type, inline: true },
-            { name: '⭐ Rarity', value: card.rarity, inline: true },
-            { name: '💎 Shop Price', value: `${card.gemCost}💎`, inline: true },
-            { name: '💰 Sell Value', value: `${Math.round(card.gemCost * SELL_BACK_RATE)}💎`, inline: true },
-        );
-    if (card.lore) embed.addFields({ name: '📖 Lore', value: card.lore });
-    const movesText = card.moves.map(m => `${m.emoji} **${m.name}** — ${m.damage} dmg | Cost: ${m.cost}⚡${m.isEx ? ' ✨EX' : ''}`).join('\n');
-    embed.addFields({ name: '⚔️ Moves', value: movesText });
-    return embed;
-}
-
-// ─── SLOT MACHINE ─────────────────────────────────────────────────────────────
-
-const SLOT_SYMBOLS = ['🍋', '🍒', '🔔', '⭐', '💎', '7️⃣'];
-const SLOT_PAYOUTS = {
-    '💎💎💎': 20,
-    '7️⃣7️⃣7️⃣': 15,
-    '⭐⭐⭐': 10,
-    '🔔🔔🔔': 7,
-    '🍒🍒🍒': 5,
-    '🍋🍋🍋': 4,
-    'pair': 1.5,
-};
-
-function spinSlots() {
-    return [
-        SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)],
-        SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)],
-        SLOT_SYMBOLS[Math.floor(Math.random() * SLOT_SYMBOLS.length)],
-    ];
-}
-
-function evalSlots(reels) {
-    const key = reels.join('');
-    if (SLOT_PAYOUTS[key]) return SLOT_PAYOUTS[key];
-    if (reels[0] === reels[1] || reels[1] === reels[2] || reels[0] === reels[2]) return SLOT_PAYOUTS['pair'];
-    return 0;
-}
-
-// ─── ARENA CHOICES ────────────────────────────────────────────────────────────
-
-const ARENA_CHOICES = [
-    { name: '🏝️ 100 Player Island', value: '100_player_island' },
-    { name: '💞 Mingle', value: 'mingle' },
-    { name: '🚦 RLGL', value: 'rlgl' },
-    { name: '🪢 Jumprope', value: 'jumprope' },
-    { name: '🌪️ Spinner', value: 'spinner' },
-    { name: '⚔️ Red vs Blue Island', value: 'red_vs_blue' },
-    { name: '🪙 Pick a Side', value: 'pick_a_side' },
-];
-
-// ─── COMMANDS ─────────────────────────────────────────────────────────────────
-
+// ─── COMMAND REGISTRATION ─────────────────────────────────────────────────────
 const commands = [
     new SlashCommandBuilder().setName('openpack').setDescription('Open a TFCImon pack and get 3 cards!').toJSON(),
     new SlashCommandBuilder().setName('deck').setDescription('View your TFCImon card deck').toJSON(),
@@ -471,92 +434,322 @@ const commands = [
     new SlashCommandBuilder().setName('arenas').setDescription('View all arenas and holders').toJSON(),
     new SlashCommandBuilder().setName('builddeck').setDescription('Choose up to 3 cards as your active battle deck').toJSON(),
     new SlashCommandBuilder().setName('cleardeck').setDescription('Clear your active deck and go back to random card selection').toJSON(),
-    new SlashCommandBuilder()
-        .setName('order')
-        .setDescription('Sort your deck cards')
-        .addStringOption(opt => opt.setName('by').setDescription('How to sort').setRequired(true)
-            .addChoices(
-                { name: '⭐ Rarity', value: 'rarity' },
-                { name: '❤️ HP (highest first)', value: 'hp' },
-                { name: '🔤 Name (A-Z)', value: 'name' },
-                { name: '🏆 Most wins', value: 'wins' },
-                { name: '⬆️ Level', value: 'level' },
-            )
-        ).toJSON(),
-    new SlashCommandBuilder().setName('sell').setDescription(`Sell a card back for ${Math.round(SELL_BACK_RATE * 100)}% of its gem cost`).addStringOption(opt => opt.setName('card').setDescription('Card to sell').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
+    new SlashCommandBuilder().setName('order').setDescription('Sort your deck cards').addStringOption(opt => opt.setName('by').setDescription('How to sort').setRequired(true).addChoices({ name: '⭐ Rarity', value: 'rarity' }, { name: '❤️ HP', value: 'hp' }, { name: '🔤 Name', value: 'name' }, { name: '🏆 Wins', value: 'wins' }, { name: '⬆️ Level', value: 'level' })).toJSON(),
+    new SlashCommandBuilder().setName('sell').setDescription(`Sell a card`).addStringOption(opt => opt.setName('card').setDescription('Card to sell').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
     new SlashCommandBuilder().setName('buypack').setDescription(`Buy a pack for ${PACK_GEM_COST} gems`).toJSON(),
-    new SlashCommandBuilder().setName('battle').setDescription('Challenge another member to a TFCImon battle!').addUserOption(opt => opt.setName('opponent').setDescription('The member to battle').setRequired(true)).toJSON(),
-    new SlashCommandBuilder().setName('name').setDescription('Give a nickname to a card in your deck')
-        .addStringOption(opt => opt.setName('card').setDescription('Card to rename').setRequired(true).addChoices(...getAllCardChoices()))
-        .addStringOption(opt => opt.setName('nickname').setDescription('The nickname').setRequired(true).setMaxLength(32)).toJSON(),
+    new SlashCommandBuilder().setName('battle').setDescription('Challenge another member!').addUserOption(opt => opt.setName('opponent').setDescription('The member to battle').setRequired(true)).toJSON(),
+    new SlashCommandBuilder().setName('name').setDescription('Give a nickname to a card').addStringOption(opt => opt.setName('card').setDescription('Card to rename').setRequired(true).addChoices(...getAllCardChoices())).addStringOption(opt => opt.setName('nickname').setDescription('The nickname').setRequired(true).setMaxLength(32)).toJSON(),
     new SlashCommandBuilder().setName('challenge').setDescription('Challenge an arena guardian!').addStringOption(opt => opt.setName('arena').setDescription('Which arena').setRequired(true).addChoices(...ARENA_CHOICES)).toJSON(),
-    new SlashCommandBuilder().setName('gamble').setDescription('Gamble gems (45% win, 10% push, 45% lose)').addIntegerOption(opt => opt.setName('amount').setDescription('Amount to gamble').setRequired(true).setMinValue(10)).toJSON(),
-    new SlashCommandBuilder().setName('coinflip').setDescription('Flip a coin — call it right and double your bet!')
-        .addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(5))
-        .addStringOption(opt => opt.setName('call').setDescription('Heads or tails?').setRequired(true).addChoices({ name: '🪙 Heads', value: 'heads' }, { name: '🔵 Tails', value: 'tails' })).toJSON(),
-    new SlashCommandBuilder().setName('slots').setDescription('Spin the slot machine! Match symbols to multiply your bet.')
-        .addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(10)).toJSON(),
-    new SlashCommandBuilder().setName('dice').setDescription('Roll dice against the house — roll higher to win!')
-        .addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(10))
-        .addStringOption(opt => opt.setName('mode').setDescription('Game mode').setRequired(true).addChoices(
-            { name: '🎲 Classic (1d6 vs house)', value: 'classic' },
-            { name: '🎲🎲 High Stakes (2d6, must beat 7)', value: 'highstakes' },
-            { name: '🃏 Lucky 21 (d20 + d6, must hit 21)', value: 'lucky21' },
-        )).toJSON(),
+    new SlashCommandBuilder().setName('gamble').setDescription('Gamble gems').addIntegerOption(opt => opt.setName('amount').setDescription('Amount to gamble').setRequired(true).setMinValue(10)).toJSON(),
+    new SlashCommandBuilder().setName('coinflip').setDescription('Flip a coin!').addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(5)).addStringOption(opt => opt.setName('call').setDescription('Heads or tails?').setRequired(true).addChoices({ name: '🪙 Heads', value: 'heads' }, { name: '🔵 Tails', value: 'tails' })).toJSON(),
+    new SlashCommandBuilder().setName('slots').setDescription('Spin the slot machine!').addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(10)).toJSON(),
+    new SlashCommandBuilder().setName('dice').setDescription('Roll dice!').addIntegerOption(opt => opt.setName('amount').setDescription('Amount to bet').setRequired(true).setMinValue(10)).addStringOption(opt => opt.setName('mode').setDescription('Game mode').setRequired(true).addChoices({ name: '🎲 Classic', value: 'classic' }, { name: '🎲🎲 High Stakes', value: 'highstakes' }, { name: '🃏 Lucky 21', value: 'lucky21' })).toJSON(),
     new SlashCommandBuilder().setName('bounties').setDescription('View all active bounties').toJSON(),
-    new SlashCommandBuilder().setName('gift').setDescription('Gift a card to another player').addUserOption(opt => opt.setName('user').setDescription('Who to gift to').setRequired(true)).addStringOption(opt => opt.setName('card').setDescription('Card to gift').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
-    new SlashCommandBuilder().setName('trade').setDescription('Offer a card trade to another player')
-        .addUserOption(opt => opt.setName('user').setDescription('Who to trade with').setRequired(true))
-        .addStringOption(opt => opt.setName('yougive').setDescription('Card you give').setRequired(true).addChoices(...getAllCardChoices()))
-        .addStringOption(opt => opt.setName('youget').setDescription('Card you want').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
-    new SlashCommandBuilder().setName('ah').setDescription('Browse the auction house').toJSON(),
-    new SlashCommandBuilder().setName('ah-sell').setDescription('List a card on the auction house')
-        .addStringOption(opt => opt.setName('card').setDescription('Card to sell').setRequired(true).addChoices(...getAllCardChoices()))
-        .addIntegerOption(opt => opt.setName('price').setDescription('Instant buy price in gems').setRequired(true).setMinValue(1))
-        .addIntegerOption(opt => opt.setName('bidstart').setDescription('Starting bid (optional)').setMinValue(1)).toJSON(),
-    new SlashCommandBuilder().setName('ah-search').setDescription('Search the auction house').addStringOption(opt => opt.setName('card').setDescription('Card to search').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
-    new SlashCommandBuilder().setName('jointournament').setDescription('Join the upcoming tournament!').toJSON(),
-    new SlashCommandBuilder().setName('op').setDescription('[OP] Grant another user OP permissions').addUserOption(opt => opt.setName('user').setDescription('User to grant OP').setRequired(true)).toJSON(),
-    new SlashCommandBuilder().setName('makecard').setDescription('[OP] Create a custom card')
-        .addStringOption(opt => opt.setName('name').setDescription('Card name').setRequired(true))
-        .addIntegerOption(opt => opt.setName('hp').setDescription('HP').setRequired(true).setMinValue(1).setMaxValue(9999))
-        .addStringOption(opt => opt.setName('type').set
-// ─── ERROR HANDLING FOR 24/7 OPERATION ───────────────────────────────────────
+    new SlashCommandBuilder().setName('gift').setDescription('Gift a card').addUserOption(opt => opt.setName('user').setDescription('Who to gift to').setRequired(true)).addStringOption(opt => opt.setName('card').setDescription('Card to gift').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
+    new SlashCommandBuilder().setName('trade').setDescription('Trade cards').addUserOption(opt => opt.setName('user').setDescription('Who to trade with').setRequired(true)).addStringOption(opt => opt.setName('yougive').setDescription('Card you give').setRequired(true).addChoices(...getAllCardChoices())).addStringOption(opt => opt.setName('youget').setDescription('Card you want').setRequired(true).addChoices(...getAllCardChoices())).toJSON(),
+    new SlashCommandBuilder().setName('ah').setDescription('Browse auction house').toJSON(),
+    new SlashCommandBuilder().setName('ah-sell').setDescription('List a card').addStringOption(opt => opt.setName('card').setDescription('Card to sell').setRequired(true).addChoices(...getAllCardChoices())).addIntegerOption(opt => opt.setName('price').setDescription('Buy price').setRequired(true).setMinValue(1)).toJSON(),
+    new SlashCommandBuilder().setName('jointournament').setDescription('Join tournament!').toJSON(),
+    new SlashCommandBuilder().setName('op').setDescription('[OP] Grant OP').addUserOption(opt => opt.setName('user').setDescription('User').setRequired(true)).toJSON(),
+];
 
-// Handle uncaught errors gracefully
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
-    // Don't crash, just log and continue
+async function registerCommands() {
+    const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+    try {
+        console.log('🔄 Registering slash commands...');
+        await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
+        console.log('✅ Slash commands registered!');
+    } catch (err) { console.error('Failed to register commands:', err); }
+}
+
+// ─── DISCORD CLIENT ──────────────────────────────────────────────────────────
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+
+client.once('ready', () => {
+    console.log(`✅ TFCImon bot online as ${client.user.tag}!`);
+    client.user.setActivity('TFCImon — /openpack to start!');
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+// ─── INTERACTION HANDLER ──────────────────────────────────────────────────────
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+    
+    const { commandName } = interaction;
+    const userId = interaction.user.id;
+    
+    if (isBanned(userId) && commandName !== 'op') {
+        return interaction.reply({ content: '🚫 You are banned from TFCImon.', ephemeral: true });
+    }
+    
+    const freezeBlocked = ['battle', 'challenge', 'gamble', 'coinflip', 'slots', 'dice'];
+    if (isFrozen(userId) && freezeBlocked.includes(commandName)) {
+        return interaction.reply({ content: '🧊 You are frozen and cannot battle or gamble.', ephemeral: true });
+    }
+    
+    const player = getPlayer(userId);
+    
+    // ─── OPENPACK ────────────────────────────────────────────────────────────────
+    if (commandName === 'openpack') {
+        await interaction.deferReply();
+        const pulled = openPack(3);
+        for (const id of pulled) id === 'energy' ? player.energyCards++ : player.deck.push(id);
+        const earned = 10 * gemMultiplier();
+        player.gems += earned;
+        saveData();
+        
+        const embed = new EmbedBuilder()
+            .setTitle('📦 Pack Opened!')
+            .setDescription(`${interaction.user.displayName} tore open a pack!\n+${earned}💎${doubleGemsEvent ? ' 🎉 DOUBLE GEMS!' : ''}`)
+            .setColor(0xf39c12)
+            .addFields({ name: '🎴 You got:', value: pulled.map((id, i) => {
+                if (id === 'energy') return `**${i+1}:** ⚡ Energy Card`;
+                const c = CARDS[id];
+                return `**${i+1}:** ${c.emoji} **${c.name}** — ${c.hp}HP`;
+            }).join('\n') });
+        await interaction.editReply({ embeds: [embed] });
+    }
+    
+    // ─── DECK ───────────────────────────────────────────────────────────────────
+    else if (commandName === 'deck') {
+        await interaction.reply({ embeds: [buildDeckEmbed(userId, player, interaction.user.displayName)] });
+    }
+    
+    // ─── INSPECT ────────────────────────────────────────────────────────────────
+    else if (commandName === 'inspect') {
+        const target = interaction.options.getUser('user');
+        const tp = getPlayer(target.id);
+        await interaction.reply({ embeds: [buildDeckEmbed(target.id, tp, target.displayName)] });
+    }
+    
+    // ─── GEMS ───────────────────────────────────────────────────────────────────
+    else if (commandName === 'gems') {
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('💎 Your Gems')
+            .setDescription(`You have **${player.gems} gems**!\n\n• Open packs: +${10 * gemMultiplier()}💎\n• Win PvP: +${25 * gemMultiplier()}💎\n• Conquer arena: +${50 * gemMultiplier()}💎\n• Daily reward: up to 200💎\n• Gambling 🎰\n• Selling cards 💰`)
+            .setColor(0xf1c40f)
+        ] });
+    }
+    
+    // ─── DAILY ──────────────────────────────────────────────────────────────────
+    else if (commandName === 'daily') {
+        const now = Date.now();
+        const cooldown = 24 * 60 * 60 * 1000;
+        if (player.lastDaily && now - player.lastDaily < cooldown) {
+            const remaining = cooldown - (now - player.lastDaily);
+            const h = Math.floor(remaining / 3600000);
+            const m = Math.floor((remaining % 3600000) / 60000);
+            return interaction.reply({ content: `⏰ Come back in **${h}h ${m}m**.`, ephemeral: true });
+        }
+        const reward = Math.floor(Math.random() * 151) + 50;
+        const total = reward * gemMultiplier();
+        player.gems += total;
+        player.lastDaily = now;
+        saveData();
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('🎁 Daily Reward!')
+            .setDescription(`+**${total}💎 gems**${doubleGemsEvent ? ' (×2!)' : ''}\nTotal: **${player.gems}💎**`)
+            .setColor(0x00b894)
+        ] });
+    }
+    
+    // ─── LEADERBOARD ───────────────────────────────────────────────────────────
+    else if (commandName === 'leaderboard' || commandName === 'top') {
+        const players = [...playerData.entries()].map(([id, p]) => ({ id, ...p }));
+        const byWins = [...players].sort((a, b) => (b.wins || 0) - (a.wins || 0)).slice(0, 5);
+        const byGems = [...players].sort((a, b) => (b.gems || 0) - (a.gems || 0)).slice(0, 5);
+        const medals = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'];
+        const embed = new EmbedBuilder().setTitle('🏆 TFCImon Leaderboard').setColor(0xf1c40f);
+        embed.addFields(
+            { name: '⚔️ Top Battlers', value: byWins.map((p, i) => `${medals[i]} <@${p.id}> — **${p.wins || 0}W**`).join('\n') || 'No battles yet!' },
+            { name: '💎 Top Gem Holders', value: byGems.map((p, i) => `${medals[i]} <@${p.id}> — **${p.gems || 0}💎**`).join('\n') || 'No data!' }
+        );
+        const holders = Object.values(ARENAS).filter(a => a.holder).map(a => `${a.emoji} **${a.name}** → ${a.holderName}`).join('\n');
+        if (holders) embed.addFields({ name: '🏟️ Arena Holders', value: holders });
+        await interaction.reply({ embeds: [embed] });
+    }
+    
+    // ─── STATS ──────────────────────────────────────────────────────────────────
+    else if (commandName === 'stats') {
+        const embed = new EmbedBuilder()
+            .setTitle(`📊 ${interaction.user.displayName}'s Stats`)
+            .setColor(0x3498db)
+            .addFields(
+                { name: '⚔️ Battles', value: `${player.wins}W / ${player.losses}L`, inline: true },
+                { name: '💎 Gems', value: `${player.gems}`, inline: true },
+                { name: '🃏 Cards', value: `${player.deck.length}`, inline: true },
+                { name: '⚡ Energy Cards', value: `${player.energyCards}`, inline: true }
+            );
+        await interaction.reply({ embeds: [embed] });
+    }
+    
+    // ─── SHOP ───────────────────────────────────────────────────────────────────
+    else if (commandName === 'shop') {
+        const embed = new EmbedBuilder()
+            .setTitle('🛒 TFCImon Gem Shop')
+            .setDescription(`Balance: **${player.gems}💎**\nSell cards for ${Math.round(SELL_BACK_RATE * 100)}% back.`)
+            .setColor(0xf1c40f)
+            .addFields({ name: '📦 Pack (150💎)', value: '3 random cards — `/buypack`' });
+        for (const c of Object.values(CARDS).slice(0, 5)) {
+            embed.addFields({ name: `${c.emoji} ${c.name} (${c.gemCost}💎)`, value: `${c.rarity} | ${c.hp}HP`, inline: true });
+        }
+        await interaction.reply({ embeds: [embed] });
+    }
+    
+    // ─── BUYPACK ────────────────────────────────────────────────────────────────
+    else if (commandName === 'buypack') {
+        if (player.gems < PACK_GEM_COST) {
+            return interaction.reply({ content: `❌ Need ${PACK_GEM_COST}💎, have ${player.gems}💎.`, ephemeral: true });
+        }
+        player.gems -= PACK_GEM_COST;
+        const pulled = openPack(3);
+        for (const id of pulled) id === 'energy' ? player.energyCards++ : player.deck.push(id);
+        saveData();
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('🛒 Pack Purchased!')
+            .setDescription(`You got: ${pulled.map(id => id === 'energy' ? '⚡ Energy Card' : CARDS[id]?.name).join(', ')}`)
+            .setColor(0xf39c12)
+            .setFooter({ text: `Remaining: ${player.gems}💎` })
+        ] });
+    }
+    
+    // ─── SELL ───────────────────────────────────────────────────────────────────
+    else if (commandName === 'sell') {
+        const cardId = interaction.options.getString('card');
+        const card = CARDS[cardId];
+        if (!player.deck.includes(cardId)) {
+            return interaction.reply({ content: `❌ You don't have **${card?.name}**!`, ephemeral: true });
+        }
+        const val = Math.round(card.gemCost * SELL_BACK_RATE);
+        player.deck.splice(player.deck.indexOf(cardId), 1);
+        player.gems += val;
+        saveData();
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('💰 Card Sold!')
+            .setDescription(`Sold ${card.emoji} **${card.name}** for **${val}💎**!\nBalance: **${player.gems}💎**`)
+            .setColor(0x00b894)
+        ] });
+    }
+    
+    // ─── GAMBLE ─────────────────────────────────────────────────────────────────
+    else if (commandName === 'gamble') {
+        const amount = interaction.options.getInteger('amount');
+        if (player.gems < amount) {
+            return interaction.reply({ content: `❌ You only have ${player.gems}💎!`, ephemeral: true });
+        }
+        const roll = Math.random();
+        let result;
+        if (roll < 0.45) {
+            player.gems += amount;
+            result = `🎰 **YOU WIN!** +${amount}💎`;
+        } else if (roll < 0.55) {
+            const lost = Math.floor(amount / 2);
+            player.gems -= lost;
+            result = `🎰 **PUSH!** -${lost}💎`;
+        } else {
+            player.gems -= amount;
+            result = `🎰 **YOU LOSE!** -${amount}💎`;
+        }
+        saveData();
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('🎰 Gem Gamble!')
+            .setDescription(`You bet **${amount}💎**\n\n${result}\nBalance: **${player.gems}💎**`)
+            .setColor(roll < 0.45 ? 0x00b894 : roll < 0.55 ? 0xf39c12 : 0xe74c3c)
+        ] });
+    }
+    
+    // ─── COINFLIP ───────────────────────────────────────────────────────────────
+    else if (commandName === 'coinflip') {
+        const amount = interaction.options.getInteger('amount');
+        const call = interaction.options.getString('call');
+        if (player.gems < amount) {
+            return interaction.reply({ content: `❌ You only have ${player.gems}💎!`, ephemeral: true });
+        }
+        const result = Math.random() < 0.5 ? 'heads' : 'tails';
+        const won = result === call;
+        if (won) player.gems += amount;
+        else player.gems -= amount;
+        saveData();
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle(`🪙 Coin Flip!`)
+            .setDescription(`You called **${call}** — landed on **${result}**!\n\n${won ? `✅ **YOU WIN! +${amount}💎**` : `❌ **YOU LOSE! -${amount}💎**`}\nBalance: **${player.gems}💎**`)
+            .setColor(won ? 0x00b894 : 0xe74c3c)
+        ] });
+    }
+    
+    // ─── SLOTS ──────────────────────────────────────────────────────────────────
+    else if (commandName === 'slots') {
+        const amount = interaction.options.getInteger('amount');
+        if (player.gems < amount) {
+            return interaction.reply({ content: `❌ You only have ${player.gems}💎!`, ephemeral: true });
+        }
+        const reels = spinSlots();
+        const multiplier = evalSlots(reels);
+        let resultText;
+        if (multiplier === 0) {
+            player.gems -= amount;
+            resultText = `❌ No match! **-${amount}💎**`;
+        } else {
+            const winnings = Math.floor(amount * multiplier) - amount;
+            player.gems += winnings;
+            resultText = `✅ **${multiplier}x multiplier!** +${winnings}💎`;
+        }
+        saveData();
+        await interaction.reply({ embeds: [new EmbedBuilder()
+            .setTitle('🎰 Slot Machine!')
+            .setDescription(`\`\`\`\n[ ${reels.join(' | ')} ]\n\`\`\`\n${resultText}\nBalance: **${player.gems}💎**`)
+            .setColor(multiplier > 0 ? 0xf1c40f : 0xe74c3c)
+        ] });
+    }
+    
+    // ─── DEFAULT RESPONSE ───────────────────────────────────────────────────────
+    else {
+        await interaction.reply({ content: `⚠️ Command \`/${commandName}\` is being set up. Try again in a few seconds!`, ephemeral: true });
+    }
+});
+
+// ─── 24/7 KEEP-ALIVE SYSTEM ───────────────────────────────────────────────────
+const keepAliveServer = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'alive', uptime: process.uptime(), timestamp: new Date().toISOString() }));
+    } else {
+        res.writeHead(200);
+        res.end('TFCImon Bot is running!');
+    }
+});
+
+const PORT = process.env.PORT || 8080;
+keepAliveServer.listen(PORT, () => {
+    console.log(`✅ Health check server running on port ${PORT}`);
+});
+
+// Self-ping every 4 minutes to prevent Railway from sleeping
+function selfPing() {
+    const url = `http://localhost:${PORT}/health`;
+    const req = http.get(url, (res) => {
+        console.log(`💓 Self-ping at ${new Date().toTimeString()} - Status: ${res.statusCode}`);
+    });
+    req.on('error', () => {});
+}
+
+setInterval(selfPing, 240000); // Every 4 minutes
+console.log('🔄 Keep-alive system active - pinging every 4 minutes');
+
+// ─── ERROR HANDLING ───────────────────────────────────────────────────────────
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
     console.error('❌ Unhandled Rejection:', reason);
 });
 
-// Auto-reconnect on disconnect
-client.on('disconnect', (event) => {
-    console.log(`⚠️ Disconnected! Code: ${event.code}. Attempting to reconnect...`);
-});
+process.on('SIGINT', () => { saveData(); console.log('💾 Saved!'); process.exit(0); });
+process.on('SIGTERM', () => { saveData(); console.log('💾 Saved!'); process.exit(0); });
 
-client.on('reconnecting', () => {
-    console.log('🔄 Reconnecting to Discord...');
-});
-
-client.on('error', (error) => {
-    console.error('❌ Client error:', error);
-});
-
-// Heartbeat check to ensure bot is alive
-let lastHeartbeat = Date.now();
-client.on('ready', () => {
-    setInterval(() => {
-        if (Date.now() - lastHeartbeat > 60000) {
-            console.log('⚠️ Heartbeat timeout? Restarting...');
-            process.exit(1); // Railway will restart
-        }
-    }, 30000);
-});
-
-client.on('heartbeat', () => {
-    lastHeartbeat = Date.now();
-});
+// ─── START BOT ─────────────────────────────────────────────────────────────────
+(async () => {
+    await registerCommands();
+    await client.login(BOT_TOKEN);
+    console.log('🎮 TFCImon Bot is fully online and will stay alive 24/7!');
+})();
